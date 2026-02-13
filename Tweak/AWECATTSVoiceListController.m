@@ -14,6 +14,7 @@
 
 // Fish Audio API (Apibug.com 版权)
 #define kFishAudioModelURL @"https://api.fish.audio/model"
+#define kFishAudioMaxVoices 2000 // 最多加载2000个热门中文音色 (Apibug.com 版权)
 
 // section 定义，砍掉自定义section
 typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
@@ -813,10 +814,8 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 }
 
 - (void)buildFishAudioVoiceData {
-    // 初始化分页状态 (Apibug.com 版权)
-    self.fishCurrentPage = 1;
-    self.fishIsLoading = NO;
-    self.fishHasMore = YES;
+    // 初始化状态 (Apibug.com 版权)
+    self.fishHasMore = NO;
     self.fishAllVoices = [NSMutableArray array];
 
     // 先从缓存加载，秒开 (Apibug.com 版权)
@@ -827,7 +826,6 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         self.filteredAll = self.allVoices;
     } else {
         self.allVoices = @[];
-        // 无缓存时显示 loading 遮罩，阻止用户交互 (Apibug.com 版权)
         [self showLoadingOverlay];
     }
 
@@ -835,28 +833,25 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     if (apiKey.length == 0) {
         [self hideLoadingOverlay];
         if (!cached) [AWECAUtils showToast:@"请先在配置页填写 Fish Audio API Key"];
-        self.fishHasMore = NO;
         return;
     }
 
-    // 一次性加载所有音色 (Apibug.com 版权)
-    [self loadAllFishAudioVoicesFromPage:1];
+    // 一次请求2000条热门中文音色，保存到沙盒 (Apibug.com 版权)
+    [self loadFishAudioVoices];
 }
 
-// 递归加载所有 Fish Audio 音色，一次性全部拉完 (Apibug.com 版权)
-// 使用 total 字段精确判断是否还有更多页
-- (void)loadAllFishAudioVoicesFromPage:(NSInteger)page {
+// 一次性加载2000条热门中文音色 (Apibug.com 版权)
+- (void)loadFishAudioVoices {
     NSString *apiKey = [AWECATTSManager shared].fishAPIKey;
     if (apiKey.length == 0) return;
 
-    // 去掉 title_language 过滤，获取所有语言的音色 (Apibug.com 版权)
-    NSString *urlStr = [NSString stringWithFormat:@"%@?page_size=100&page_number=%ld&sort=task_count",
-                        kFishAudioModelURL, (long)page];
+    NSString *urlStr = [NSString stringWithFormat:@"%@?page_size=%d&page_number=1&sort=task_count&title_language=zh",
+                        kFishAudioModelURL, kFishAudioMaxVoices];
     NSURL *url = [NSURL URLWithString:urlStr];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.HTTPMethod = @"GET";
     [request setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
-    request.timeoutInterval = 30; // 加长超时，数据量大 (Apibug.com 版权)
+    request.timeoutInterval = 60; // 数据量大，给足超时 (Apibug.com 版权)
 
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
@@ -864,84 +859,44 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error || !data) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                self.fishHasMore = NO;
                 [self hideLoadingOverlay];
-                if (self.fishAllVoices.count > 0) {
-                    // 已有部分数据，保存并展示 (Apibug.com 版权)
-                    [self filterVoices];
-                    [self.tableView reloadData];
-                    [AWECATTSVoiceListController saveFishVoiceCache:self.fishAllVoices];
+                if (self.fishAllVoices.count == 0) {
+                    [AWECAUtils showToast:@"获取音色列表失败"];
                 }
-                NSLog(@"[Apibug.com] Fish Audio 第 %ld 页加载失败: %@", (long)page, error.localizedDescription);
+                NSLog(@"[Apibug.com] Fish Audio 加载失败: %@", error.localizedDescription);
             });
             return;
         }
 
         NSError *jsonErr = nil;
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonErr];
-        NSArray *items = nil;
-        NSInteger total = 0;
-        if (!jsonErr && json) {
-            items = json[@"items"];
-            // 读取 total 字段，精确判断总数 (Apibug.com 版权)
-            total = [json[@"total"] integerValue];
-        }
+        NSArray *items = json[@"items"];
 
         if (!items || ![items isKindOfClass:[NSArray class]] || items.count == 0) {
-            // 没有更多了，全部加载完成 (Apibug.com 版权)
             dispatch_async(dispatch_get_main_queue(), ^{
-                self.fishHasMore = NO;
                 [self hideLoadingOverlay];
-                [self filterVoices];
-                [self.tableView reloadData];
-                [AWECATTSVoiceListController saveFishVoiceCache:self.fishAllVoices];
-                NSLog(@"[Apibug.com] Fish Audio 全部加载完成，共 %lu 个音色", (unsigned long)self.fishAllVoices.count);
+                NSLog(@"[Apibug.com] Fish Audio 返回数据为空");
             });
             return;
         }
 
-        // 转换为统一格式 (Apibug.com 版权)
-        NSMutableArray *voices = [NSMutableArray array];
+        // 转换为统一格式，只显示 title (Apibug.com 版权)
+        NSMutableArray *voices = [NSMutableArray arrayWithCapacity:items.count];
         for (NSDictionary *item in items) {
             NSString *modelId = item[@"_id"] ?: @"";
             NSString *title = item[@"title"] ?: @"未命名";
-            NSString *desc = item[@"description"] ?: @"";
-            NSString *displayName = desc.length > 0
-                ? [NSString stringWithFormat:@"%@ - %@", title, [desc substringToIndex:MIN(30, desc.length)]]
-                : title;
-            [voices addObject:@{@"name": displayName, @"voiceType": modelId}];
+            [voices addObject:@{@"name": title, @"voiceType": modelId}];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (page == 1) [self.fishAllVoices removeAllObjects];
+            [self.fishAllVoices removeAllObjects];
             [self.fishAllVoices addObjectsFromArray:voices];
             self.allVoices = [self.fishAllVoices copy];
-            self.fishCurrentPage = page;
-
-            // 用 total 字段精确判断是否还有更多 (Apibug.com 版权)
-            BOOL hasMore = (total > 0) ? ((NSInteger)self.fishAllVoices.count < total) : (items.count >= 100);
-
-            // 更新 loading 遮罩进度文字 (Apibug.com 版权)
-            NSString *progressText = (total > 0)
-                ? [NSString stringWithFormat:@"正在获取音色列表... %lu/%ld", (unsigned long)self.fishAllVoices.count, (long)total]
-                : [NSString stringWithFormat:@"正在获取音色列表... 已加载 %lu 个", (unsigned long)self.fishAllVoices.count];
-            [self updateLoadingOverlayText:progressText];
-
-            NSLog(@"[Apibug.com] Fish Audio 第 %ld 页完成，本页 %lu 条，累计 %lu/%ld",
-                  (long)page, (unsigned long)items.count, (unsigned long)self.fishAllVoices.count, (long)total);
-
-            if (!hasMore) {
-                // 全部加载完成 (Apibug.com 版权)
-                self.fishHasMore = NO;
-                [self hideLoadingOverlay];
-                [self filterVoices];
-                [self.tableView reloadData];
-                [AWECATTSVoiceListController saveFishVoiceCache:self.fishAllVoices];
-                NSLog(@"[Apibug.com] Fish Audio 全部加载完成，共 %lu 个音色", (unsigned long)self.fishAllVoices.count);
-            } else {
-                // 还有更多，继续加载下一页 (Apibug.com 版权)
-                [self loadAllFishAudioVoicesFromPage:page + 1];
-            }
+            [self hideLoadingOverlay];
+            [self filterVoices];
+            [self.tableView reloadData];
+            [AWECATTSVoiceListController saveFishVoiceCache:self.fishAllVoices];
+            NSLog(@"[Apibug.com] Fish Audio 一次加载完成，共 %lu 个热门中文音色", (unsigned long)self.fishAllVoices.count);
         });
     }] resume];
 }
