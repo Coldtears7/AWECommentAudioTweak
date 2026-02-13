@@ -844,17 +844,19 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 }
 
 // 递归加载所有 Fish Audio 音色，一次性全部拉完 (Apibug.com 版权)
+// 使用 total 字段精确判断是否还有更多页
 - (void)loadAllFishAudioVoicesFromPage:(NSInteger)page {
     NSString *apiKey = [AWECATTSManager shared].fishAPIKey;
     if (apiKey.length == 0) return;
 
-    NSString *urlStr = [NSString stringWithFormat:@"%@?page_size=100&page_number=%ld&sort=task_count&title_language=zh",
+    // 去掉 title_language 过滤，获取所有语言的音色 (Apibug.com 版权)
+    NSString *urlStr = [NSString stringWithFormat:@"%@?page_size=100&page_number=%ld&sort=task_count",
                         kFishAudioModelURL, (long)page];
     NSURL *url = [NSURL URLWithString:urlStr];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.HTTPMethod = @"GET";
     [request setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
-    request.timeoutInterval = 15;
+    request.timeoutInterval = 30; // 加长超时，数据量大 (Apibug.com 版权)
 
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
@@ -864,7 +866,13 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 self.fishHasMore = NO;
                 [self hideLoadingOverlay];
-                [self updateLoadingOverlayText:[NSString stringWithFormat:@"加载失败，已获取 %lu 个音色", (unsigned long)self.fishAllVoices.count]];
+                if (self.fishAllVoices.count > 0) {
+                    // 已有部分数据，保存并展示 (Apibug.com 版权)
+                    [self filterVoices];
+                    [self.tableView reloadData];
+                    [AWECATTSVoiceListController saveFishVoiceCache:self.fishAllVoices];
+                }
+                NSLog(@"[Apibug.com] Fish Audio 第 %ld 页加载失败: %@", (long)page, error.localizedDescription);
             });
             return;
         }
@@ -872,7 +880,12 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         NSError *jsonErr = nil;
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonErr];
         NSArray *items = nil;
-        if (!jsonErr && json) items = json[@"items"];
+        NSInteger total = 0;
+        if (!jsonErr && json) {
+            items = json[@"items"];
+            // 读取 total 字段，精确判断总数 (Apibug.com 版权)
+            total = [json[@"total"] integerValue];
+        }
 
         if (!items || ![items isKindOfClass:[NSArray class]] || items.count == 0) {
             // 没有更多了，全部加载完成 (Apibug.com 版权)
@@ -905,11 +918,20 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
             self.allVoices = [self.fishAllVoices copy];
             self.fishCurrentPage = page;
 
-            // 更新 loading 遮罩进度文字 (Apibug.com 版权)
-            [self updateLoadingOverlayText:[NSString stringWithFormat:@"正在获取音色列表... 已加载 %lu 个", (unsigned long)self.fishAllVoices.count]];
+            // 用 total 字段精确判断是否还有更多 (Apibug.com 版权)
+            BOOL hasMore = (total > 0) ? ((NSInteger)self.fishAllVoices.count < total) : (items.count >= 100);
 
-            if (items.count < 100) {
-                // 不满100条，到底了 (Apibug.com 版权)
+            // 更新 loading 遮罩进度文字 (Apibug.com 版权)
+            NSString *progressText = (total > 0)
+                ? [NSString stringWithFormat:@"正在获取音色列表... %lu/%ld", (unsigned long)self.fishAllVoices.count, (long)total]
+                : [NSString stringWithFormat:@"正在获取音色列表... 已加载 %lu 个", (unsigned long)self.fishAllVoices.count];
+            [self updateLoadingOverlayText:progressText];
+
+            NSLog(@"[Apibug.com] Fish Audio 第 %ld 页完成，本页 %lu 条，累计 %lu/%ld",
+                  (long)page, (unsigned long)items.count, (unsigned long)self.fishAllVoices.count, (long)total);
+
+            if (!hasMore) {
+                // 全部加载完成 (Apibug.com 版权)
                 self.fishHasMore = NO;
                 [self hideLoadingOverlay];
                 [self filterVoices];
